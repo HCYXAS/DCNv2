@@ -1,0 +1,4 @@
+Compile: ./make.sh
+Run: python3 test.py
+
+tips: check_gradient_dconv() function may cause the error, and is unstable.
