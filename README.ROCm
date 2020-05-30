@@ -1,3 +1,4 @@
+DCNv2 v1.0 support rocm
 Compile: ./make.sh
 Run: python3 test.py
 
