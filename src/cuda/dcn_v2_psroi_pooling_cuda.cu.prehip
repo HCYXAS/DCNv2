@@ -1,4 +1,3 @@
-#include "hip/hip_runtime.h"
 /*!
  * Copyright (c) 2017 Microsoft
  * Licensed under The MIT License [see LICENSE for details]
@@ -14,11 +13,11 @@
 #include <iostream>
 
 #include <ATen/ATen.h>
-#include <ATen/hip/HIPContext.h>
+#include <ATen/cuda/CUDAContext.h>
 
-#include <THH/THH.h>
-#include <THH/THHAtomics.cuh>
-#include <THH/THHDeviceUtils.cuh>
+#include <THC/THC.h>
+#include <THC/THCAtomics.cuh>
+#include <THC/THCDeviceUtils.cuh>
 
 #define CUDA_KERNEL_LOOP(i, n)                        \
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; \
@@ -93,8 +92,8 @@ __global__ void DeformablePSROIPoolForwardKernel(
     T roi_end_h = static_cast<T>(round(offset_bottom_rois[4]) + 1.) * spatial_scale - 0.5;
 
     // Force too small ROIs to be 1x1
-    T roi_width = max<T>(roi_end_w - roi_start_w, 0.1); //avoid 0
-    T roi_height = max<T>(roi_end_h - roi_start_h, 0.1);
+    T roi_width = max(roi_end_w - roi_start_w, 0.1); //avoid 0
+    T roi_height = max(roi_end_h - roi_start_h, 0.1);
 
     // Compute w and h at bottom
     T bin_size_h = roi_height / static_cast<T>(pooled_height);
@@ -118,8 +117,8 @@ __global__ void DeformablePSROIPoolForwardKernel(
     int count = 0;
     int gw = floor(static_cast<T>(pw) * group_size / pooled_width);
     int gh = floor(static_cast<T>(ph) * group_size / pooled_height);
-    gw = min<int>(max<int>(gw, 0), group_size - 1);
-    gh = min<int>(max<int>(gh, 0), group_size - 1);
+    gw = min(max(gw, 0), group_size - 1);
+    gh = min(max(gh, 0), group_size - 1);
 
     const T *offset_bottom_data = bottom_data + (roi_batch_ind * channels) * height * width;
     for (int ih = 0; ih < sample_per_part; ih++)
@@ -133,8 +132,8 @@ __global__ void DeformablePSROIPoolForwardKernel(
         {
           continue;
         }
-        w = min<T>(max<T>(w, 0.), width - 1.);
-        h = min<T>(max<T>(h, 0.), height - 1.);
+        w = min(max(w, 0.), width - 1.);
+        h = min(max(h, 0.), height - 1.);
         int c = (ctop * group_size + gh) * group_size + gw;
         T val = bilinear_interp(offset_bottom_data + c * height * width, w, h, width, height);
         sum += val;
@@ -186,8 +185,8 @@ __global__ void DeformablePSROIPoolBackwardAccKernel(
     T roi_end_h = static_cast<T>(round(offset_bottom_rois[4]) + 1.) * spatial_scale - 0.5;
 
     // Force too small ROIs to be 1x1
-    T roi_width = max<T>(roi_end_w - roi_start_w, 0.1); //avoid 0
-    T roi_height = max<T>(roi_end_h - roi_start_h, 0.1);
+    T roi_width = max(roi_end_w - roi_start_w, 0.1); //avoid 0
+    T roi_height = max(roi_end_h - roi_start_h, 0.1);
 
     // Compute w and h at bottom
     T bin_size_h = roi_height / static_cast<T>(pooled_height);
@@ -216,8 +215,8 @@ __global__ void DeformablePSROIPoolBackwardAccKernel(
     T *offset_bottom_data_diff = bottom_data_diff + roi_batch_ind * channels * height * width;
     int gw = floor(static_cast<T>(pw) * group_size / pooled_width);
     int gh = floor(static_cast<T>(ph) * group_size / pooled_height);
-    gw = min<int>(max<int>(gw, 0), group_size - 1);
-    gh = min<int>(max<int>(gh, 0), group_size - 1);
+    gw = min(max(gw, 0), group_size - 1);
+    gh = min(max(gh, 0), group_size - 1);
 
     for (int ih = 0; ih < sample_per_part; ih++)
     {
@@ -230,8 +229,8 @@ __global__ void DeformablePSROIPoolBackwardAccKernel(
         {
           continue;
         }
-        w = min<T>(max<T>(w, 0.), width - 1.);
-        h = min<T>(max<T>(h, 0.), height - 1.);
+        w = min(max(w, 0.), width - 1.);
+        h = min(max(h, 0.), height - 1.);
         int c = (ctop * group_size + gh) * group_size + gw;
         // backward on feature
         int x0 = floor(w);
@@ -304,12 +303,11 @@ dcn_v2_psroi_pooling_cuda_forward(const at::Tensor &input,
   const int num_classes = no_trans ? 1 : channels_trans / 2;
   const int channels_each_class = no_trans ? output_dim : output_dim / num_classes;
 
-  //hipStream_t stream = at::cuda::getCurrentCUDAStream();
-  hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   if (out.numel() == 0)
   {
-    THCudaCheck(hipGetLastError());
+    THCudaCheck(cudaGetLastError());
     return std::make_tuple(out, top_count);
   }
 
@@ -317,7 +315,7 @@ dcn_v2_psroi_pooling_cuda_forward(const at::Tensor &input,
   dim3 block(512);
 
   AT_DISPATCH_FLOATING_TYPES(input.type(), "dcn_v2_psroi_pooling_cuda_forward", [&] {
-    hipLaunchKernelGGL(DeformablePSROIPoolForwardKernel<scalar_t>, dim3(grid), dim3(block), 0, stream, 
+    DeformablePSROIPoolForwardKernel<scalar_t><<<grid, block, 0, stream>>>(
         out_size,
         input.contiguous().data<scalar_t>(),
         spatial_scale,
@@ -338,7 +336,7 @@ dcn_v2_psroi_pooling_cuda_forward(const at::Tensor &input,
         out.data<scalar_t>(),
         top_count.data<scalar_t>());
   });
-  THCudaCheck(hipGetLastError());
+  THCudaCheck(cudaGetLastError());
   return std::make_tuple(out, top_count);
 }
 
@@ -382,17 +380,16 @@ dcn_v2_psroi_pooling_cuda_backward(const at::Tensor &out_grad,
 
   if (input_grad.numel() == 0)
   {
-    THCudaCheck(hipGetLastError());
+    THCudaCheck(cudaGetLastError());
     return std::make_tuple(input_grad, trans_grad);
   }
 
   dim3 grid(std::min(THCCeilDiv(out_size, 512L), 4096L));
   dim3 block(512);
-  //hipStream_t stream = at::cuda::getCurrentCUDAStream();
-  hipStream_t stream = at::hip::getCurrentHIPStreamMasqueradingAsCUDA();
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   AT_DISPATCH_FLOATING_TYPES(out_grad.type(), "dcn_v2_psroi_pooling_cuda_backward", [&] {
-    hipLaunchKernelGGL(DeformablePSROIPoolBackwardAccKernel<scalar_t>, dim3(grid), dim3(block), 0, stream, 
+    DeformablePSROIPoolBackwardAccKernel<scalar_t><<<grid, block, 0, stream>>>(
         out_size,
         out_grad.contiguous().data<scalar_t>(),
         top_count.contiguous().data<scalar_t>(),
@@ -417,6 +414,6 @@ dcn_v2_psroi_pooling_cuda_backward(const at::Tensor &out_grad,
         num_classes,
         channels_each_class);
   });
-  THCudaCheck(hipGetLastError());
+  THCudaCheck(cudaGetLastError());
   return std::make_tuple(input_grad, trans_grad);
 }

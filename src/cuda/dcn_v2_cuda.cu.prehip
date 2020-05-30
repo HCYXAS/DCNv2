@@ -1,13 +1,12 @@
-#include "hip/hip_runtime.h"
 #include <vector>
 #include "cuda/dcn_v2_im2col_cuda.h"
 
 #include <ATen/ATen.h>
-#include <ATen/hip/HIPContext.h>
+#include <ATen/cuda/CUDAContext.h>
 
-#include <THH/THH.h>
-#include <THH/THHAtomics.cuh>
-#include <THH/THHDeviceUtils.cuh>
+#include <THC/THC.h>
+#include <THC/THCAtomics.cuh>
+#include <THC/THCDeviceUtils.cuh>
 
 extern THCState *state;
 
@@ -16,93 +15,7 @@ extern THCState *state;
 
 // [batch gemm]
 // https://github.com/pytorch/pytorch/blob/master/aten/src/THC/generic/THCTensorMathBlas.cu
-//HC
-void adjustLdLevel3(char transa, char transb, int64_t m, int64_t n, int64_t k, int64_t *lda, int64_t *ldb, int64_t *ldc)
-{
-  int transa_ = ((transa == 't') || (transa == 'T'));
-  int transb_ = ((transb == 't') || (transb == 'T'));
 
-  // Note: leading dimensions generally are checked that they are > 0 and at least as big the result
-  // requires (even if the value won't be used).
-  if(n <= 1)
-    *ldc = std::max<int64_t>(m, 1);
-
-  if(transa_)
-  {
-    if(m <= 1)
-      *lda = std::max<int64_t>(k, 1);
-  }
-  else
-  {
-    if(k <= 1)
-      *lda = std::max<int64_t>(m, 1);
-  }
-
-  if(transb_)
-  {
-    if(k <= 1)
-      *ldb = std::max<int64_t>(n, 1);
-  }
-  else
-  {
-    if(n <= 1)
-      *ldb = std::max<int64_t>(k, 1);
-  }
-
-}
-rocblas_operation convertTransToCublasOperation(char trans) {
-  if (trans == 't') return rocblas_operation_transpose;
-  else if (trans == 'n') return rocblas_operation_none;
-  else if (trans == 'c') return rocblas_operation_conjugate_transpose;
-  else {
-    THError("trans must be one of: t, n, c");
-    return rocblas_operation_transpose;
-  }
-}
-void THCudaBlas_SgemmStridedBatched1(THCState *state, char transa, char transb, int64_t m, int64_t n, int64_t k,
-                             float alpha, const float *a, int64_t lda, int64_t strideA, const float *b, int64_t ldb, int64_t strideB,
-                             float beta, float *c, int64_t ldc, int64_t strideC, int64_t batchCount)
-{
-  if( (m >= INT_MAX) || (n >= INT_MAX) || (k >= INT_MAX) || (lda >= INT_MAX)  || (ldb >= INT_MAX) || (ldc >= INT_MAX) || (batchCount >= INT_MAX) )
-
-  {
-    THError("Cublas_SgemmStridedBatched only supports m, n, k, lda, ldb, ldc, batchCount"
-            "with the bound [val] <= %d", INT_MAX);
-  }
-
-  adjustLdLevel3(transa, transb, m, n, k, &lda, &ldb, &ldc);
-  rocblas_operation opa = convertTransToCublasOperation(transa);
-  rocblas_operation opb = convertTransToCublasOperation(transb);
-
-  rocblas_handle handle = THCState_getCurrentBlasHandle(state);
-  rocblas_set_stream(handle, THCState_getCurrentStream(state));
-  //printf("m=%d, n=%d, k=%d, lda=%d, ldb=%d, ldc=%d, strideA=%d, strideB=%d, strideC=%d, batchCount=%d\n",
-  //       m, n, k, lda, ldb, ldc, strideA, strideB, strideC, batchCount);
-  THCublasCheck(rocblas_sgemm_strided_batched(handle,
-                                   opa, opb, (int)m, (int)n, (int)k,
-                                   &alpha, a, (int)lda, (int)strideA, b, (int)ldb, (int)strideB, &beta, c, (int)ldc, (int)strideC, (int)batchCount));
-}
-void THCudaBlas_SgemmBatched1(THCState *state, char transa, char transb, int64_t m, int64_t n, int64_t k,
-                             float alpha, const float *a, int64_t lda, const float *b, int64_t ldb,
-                             float beta, float *c, int64_t ldc, int64_t batchCount)
-{
-  if( (m >= INT_MAX) || (n >= INT_MAX) || (k >= INT_MAX) || (lda >= INT_MAX)  || (ldb >= INT_MAX) || (ldc >= INT_MAX) || (batchCount >= INT_MAX) )
-  {
-    THError("Cublas_SgemmBatched only supports m, n, k, lda, ldb, ldc, batchCount"
-            "with the bound [val] <= %d", INT_MAX);
-  }
-
-  const int64_t stridea = (transa == 'N' || transa == 'n') ? lda*k : lda*n;
-  const int64_t strideb = (transb == 'N' || transb == 'n') ? ldb*n : ldb*k;
-  const int64_t stridec = ldc*n;
-
-  THCudaBlas_SgemmStridedBatched1(state, transa, transb, m, n, k, alpha, a, lda, stridea, b, ldb, strideb, beta, c, ldc, stridec, batchCount);
-
-}
-///////
-
-
-//HC
 __global__ void createBatchGemmBuffer(const float **input_b, float **output_b,
                                       float **columns_b, const float **ones_b,
                                       const float **weight_b, const float **bias_b,
@@ -125,7 +38,6 @@ __global__ void createBatchGemmBuffer(const float **input_b, float **output_b,
         bias_b[idx] = bias;
     }
 }
-
 
 at::Tensor
 dcn_v2_cuda_forward(const at::Tensor &input,
@@ -189,65 +101,39 @@ dcn_v2_cuda_forward(const at::Tensor &input,
     auto weight_b = static_cast<const float **>(THCudaMalloc(state, matrices_size));
     auto bias_b = static_cast<const float **>(THCudaMalloc(state, matrices_size));
 
-    //HC
-    int weight_size_tmp = weight.size(0) * weight.size(1) * weight.size(2) * weight.size(3);
-    int bias_size_tmp = bias.size(0);
-    int weight_size = input.size(0) * weight_size_tmp * sizeof(float);
-    int bias_size = input.size(0) * bias_size_tmp * sizeof(float);
-    auto weight_b_ = static_cast<float *>(THCudaMalloc(state, weight_size));
-    auto bias_b_ = static_cast<float *>(THCudaMalloc(state, bias_size));
-    
-    for(int i = 0 ; i < input.size(0); i++)
-    {
-        hipMemcpy((float *)(weight_b_ + i * weight_size_tmp), weight.data<scalar_t>(), weight_size_tmp * sizeof(float), hipMemcpyDeviceToDevice);
-        hipMemcpy((float *)(bias_b_ + i * bias_size_tmp), bias.data<scalar_t>(), bias_size_tmp * sizeof(float), hipMemcpyDeviceToDevice);
-    }
     const int block = 128;
     const int grid = (batch + block - 1) / block;
 
-//    hipLaunchKernelGGL(createBatchGemmBuffer, dim3(grid), dim3(block), 0, THCState_getCurrentStream(state), 
-//        input_b, output_b,
-//        columns_b, ones_b,
-//        weight_b, bias_b,
-//        input.data<scalar_t>(),
-//        output.data<scalar_t>(),
-//        columns.data<scalar_t>(),
-//        ones.data<scalar_t>(),
-//        weight.data<scalar_t>(),
-//        bias.data<scalar_t>(),
-//        channels * width * height,
-//        channels_out * width_out * height_out,
-//        channels * kernel_h * kernel_w * height_out * width_out,
-//        height_out * width_out,
-//        batch);
+    createBatchGemmBuffer<<<grid, block, 0, THCState_getCurrentStream(state)>>>(
+        input_b, output_b,
+        columns_b, ones_b,
+        weight_b, bias_b,
+        input.data<scalar_t>(),
+        output.data<scalar_t>(),
+        columns.data<scalar_t>(),
+        ones.data<scalar_t>(),
+        weight.data<scalar_t>(),
+        bias.data<scalar_t>(),
+        channels * width * height,
+        channels_out * width_out * height_out,
+        channels * kernel_h * kernel_w * height_out * width_out,
+        height_out * width_out,
+        batch);
 
     long m_ = channels_out;
     long n_ = height_out * width_out;
     long k_ = 1;
-//    THCudaBlas_SgemmBatched(state,
-//                            't',
-//                            'n',
-//                            n_,
-//                            m_,
-//                            k_,
-//                            1.0f,
-//                            ones_b, k_,
-//                            bias_b, k_,
-//                            0.0f,
-//                            output_b, n_,
-//                            batch);
-
-   THCudaBlas_SgemmBatched1(state,
+    THCudaBlas_SgemmBatched(state,
                             't',
                             'n',
                             n_,
                             m_,
                             k_,
                             1.0f,
-                            ones.data<scalar_t>(), k_,
-                            bias_b_, k_,
+                            ones_b, k_,
+                            bias_b, k_,
                             0.0f,
-                            output.data<scalar_t>(), n_,
+                            output_b, n_,
                             batch);
 
     modulated_deformable_im2col_cuda(THCState_getCurrentStream(state),
@@ -263,17 +149,17 @@ dcn_v2_cuda_forward(const at::Tensor &input,
     long m = channels_out;
     long n = height_out * width_out;
     long k = channels * kernel_h * kernel_w;
-    THCudaBlas_SgemmBatched1(state,
+    THCudaBlas_SgemmBatched(state,
                             'n',
                             'n',
                             n,
                             m,
                             k,
                             1.0f,
-                            columns.data<scalar_t>(), n,
-                            weight_b_, k,
+                            (const float **)columns_b, n,
+                            weight_b, k,
                             1.0f,
-                            output.data<scalar_t>(), n,
+                            output_b, n,
                             batch);
 
     THCudaFree(state, input_b);
@@ -282,8 +168,6 @@ dcn_v2_cuda_forward(const at::Tensor &input,
     THCudaFree(state, ones_b);
     THCudaFree(state, weight_b);
     THCudaFree(state, bias_b);
-    THCudaFree(state, weight_b_);
-    THCudaFree(state, bias_b_);
     return output;
 }
 

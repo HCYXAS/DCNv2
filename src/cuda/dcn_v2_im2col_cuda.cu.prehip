@@ -1,23 +1,21 @@
-#include "hip/hip_runtime.h"
 #include "dcn_v2_im2col_cuda.h"
 #include <cstdio>
 #include <algorithm>
 #include <cstring>
 
 #include <ATen/ATen.h>
-#include <ATen/hip/HIPContext.h>
+#include <ATen/cuda/CUDAContext.h>
 
-#include <THH/THH.h>
-#include <THH/THHAtomics.cuh>
-#include <THH/THHDeviceUtils.cuh>
+#include <THC/THC.h>
+#include <THC/THCAtomics.cuh>
+#include <THC/THCDeviceUtils.cuh>
 
 #define CUDA_KERNEL_LOOP(i, n)                          \
   for (int i = blockIdx.x * blockDim.x + threadIdx.x;   \
       i < (n);                                          \
       i += blockDim.x * gridDim.x)
 
-//const int CUDA_NUM_THREADS = 1024;
-const int CUDA_NUM_THREADS = 256;
+const int CUDA_NUM_THREADS = 1024;
 inline int GET_BLOCKS(const int N)
 {
   return (N + CUDA_NUM_THREADS - 1) / CUDA_NUM_THREADS;
@@ -328,7 +326,7 @@ __global__ void modulated_deformable_col2im_coord_gpu_kernel(const int n,
   }
 }
 
-void modulated_deformable_im2col_cuda(hipStream_t stream,
+void modulated_deformable_im2col_cuda(cudaStream_t stream,
   const float* data_im, const float* data_offset, const float* data_mask,
   const int batch_size, const int channels, const int height_im, const int width_im, 
   const int height_col, const int width_col, const int kernel_h, const int kernel_w,
@@ -338,21 +336,22 @@ void modulated_deformable_im2col_cuda(hipStream_t stream,
   // num_axes should be smaller than block size
   const int channel_per_deformable_group = channels / deformable_group;
   const int num_kernels = channels * batch_size * height_col * width_col;
-  //printf("start modulated_deformable_im2col_gpu_kernel !!!\n");
-  hipLaunchKernelGGL(modulated_deformable_im2col_gpu_kernel, dim3(GET_BLOCKS(num_kernels)), dim3(CUDA_NUM_THREADS), 0, stream, 
+  modulated_deformable_im2col_gpu_kernel
+      <<<GET_BLOCKS(num_kernels), CUDA_NUM_THREADS,
+          0, stream>>>(
       num_kernels, data_im, data_offset, data_mask, height_im, width_im, kernel_h, kernel_w,
       pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w, channel_per_deformable_group,
       batch_size, channels, deformable_group, height_col, width_col, data_col);
-  //printf("stop modulated_deformable_im2col_gpu_kernel !!!\n");
-  hipError_t err = hipGetLastError();
-  if (err != hipSuccess)
+  
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess)
   {
-    printf("error in modulated_deformable_im2col_cuda: %s\n", hipGetErrorString(err));
+    printf("error in modulated_deformable_im2col_cuda: %s\n", cudaGetErrorString(err));
   }
 
 }
 
-void modulated_deformable_col2im_cuda(hipStream_t stream,
+void modulated_deformable_col2im_cuda(cudaStream_t stream,
   const float* data_col, const float* data_offset, const float* data_mask,
   const int batch_size, const int channels, const int height_im, const int width_im, 
   const int height_col, const int width_col, const int kernel_h, const int kernel_w,
@@ -362,20 +361,22 @@ void modulated_deformable_col2im_cuda(hipStream_t stream,
 
   const int channel_per_deformable_group = channels / deformable_group;
   const int num_kernels = channels * kernel_h * kernel_w * batch_size * height_col * width_col;
-  hipLaunchKernelGGL(modulated_deformable_col2im_gpu_kernel, dim3(GET_BLOCKS(num_kernels)), dim3(CUDA_NUM_THREADS), 0, stream, 
+  modulated_deformable_col2im_gpu_kernel
+      <<<GET_BLOCKS(num_kernels), CUDA_NUM_THREADS,
+          0, stream>>>(
         num_kernels, data_col, data_offset, data_mask, channels, height_im, width_im,
         kernel_h, kernel_w, pad_h, pad_h, stride_h, stride_w,
         dilation_h, dilation_w, channel_per_deformable_group,
         batch_size, deformable_group, height_col, width_col, grad_im);
-  hipError_t err = hipGetLastError();
-  if (err != hipSuccess)
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess)
   {
-    printf("error in modulated_deformable_col2im_cuda: %s\n", hipGetErrorString(err));
+    printf("error in modulated_deformable_col2im_cuda: %s\n", cudaGetErrorString(err));
   }
 
 }
 
-void modulated_deformable_col2im_coord_cuda(hipStream_t stream,
+void modulated_deformable_col2im_coord_cuda(cudaStream_t stream,
   const float* data_col, const float* data_im, const float* data_offset, const float* data_mask,
   const int batch_size, const int channels, const int height_im, const int width_im, 
   const int height_col, const int width_col, const int kernel_h, const int kernel_w,
@@ -385,15 +386,17 @@ void modulated_deformable_col2im_coord_cuda(hipStream_t stream,
   float* grad_offset, float* grad_mask) {
   const int num_kernels = batch_size * height_col * width_col * 2 * kernel_h * kernel_w * deformable_group;
   const int channel_per_deformable_group = channels * kernel_h * kernel_w / deformable_group;
-  hipLaunchKernelGGL(modulated_deformable_col2im_coord_gpu_kernel, dim3(GET_BLOCKS(num_kernels)), dim3(CUDA_NUM_THREADS), 0, stream, 
+  modulated_deformable_col2im_coord_gpu_kernel
+      <<<GET_BLOCKS(num_kernels), CUDA_NUM_THREADS,
+        0, stream>>>(
         num_kernels, data_col, data_im, data_offset, data_mask, channels, height_im, width_im,
         kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w,
         dilation_h, dilation_w, channel_per_deformable_group,
         batch_size, 2 * kernel_h * kernel_w * deformable_group, deformable_group, height_col, width_col, 
         grad_offset, grad_mask);
-  hipError_t err = hipGetLastError();
-  if (err != hipSuccess)
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess)
   {
-    printf("error in modulated_deformable_col2im_coord_cuda: %s\n", hipGetErrorString(err));
+    printf("error in modulated_deformable_col2im_coord_cuda: %s\n", cudaGetErrorString(err));
   }
 }
